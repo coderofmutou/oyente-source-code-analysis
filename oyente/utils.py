@@ -15,6 +15,7 @@ import six
 from z3 import *
 from z3.z3util import get_vars
 
+# 将 x 转化为 32 的倍数
 def ceil32(x):
     return x if x % 32 == 0 else x + 32 - (x % 32)
 
@@ -46,6 +47,7 @@ def to_signed(number):
     else:
         return number
 
+# 检查 z3 是否可满足
 def check_sat(solver, pop_if_exception=True):
     try:
         ret = solver.check()
@@ -57,6 +59,7 @@ def check_sat(solver, pop_if_exception=True):
         raise e
     return ret
 
+# 深度拷贝
 def custom_deepcopy(input):
     output = {}
     for key in input:
@@ -68,18 +71,20 @@ def custom_deepcopy(input):
             output[key] = input[key]
     return output
 
-
+ 
 def is_storage_var(var):
     if not isinstance(var, str): var = var.decl().name()
     return var.startswith('Ia_store')
 
 
 # copy only storage values/ variables from a given global state
+# 仅从给定的全局状态复制存储值/变量
 # TODO: add balance in the future
 def copy_global_values(global_state):
     return global_state['Ia']
 
 # check if a variable is in an expression
+# 检查变量是否在表达式中
 def is_in_expr(var, expr):
     list_vars = get_vars(expr)
     set_vars = set(i.decl().name() for i in list_vars)
@@ -87,6 +92,7 @@ def is_in_expr(var, expr):
 
 
 # check if an expression has any storage variables
+# 检查表达式是否有任何存储变量
 def has_storage_vars(expr, storage_vars):
     list_vars = get_vars(expr)
     for var in list_vars:
@@ -112,6 +118,9 @@ def get_storage_position(var):
 # Rename variables to distinguish variables in two different paths.
 # e.g. Ia_store_0 in path i becomes Ia_store_0_old if Ia_store_0 is modified
 # else we must keep Ia_store_0 if its not modified
+# 重命名变量以区分两个不同路径中的变量。
+# 例如 如果 Ia_store_0 被修改，路径 i 中的 Ia_store_0 将变为 Ia_store_0_old
+# 否则我们必须保留 Ia_store_0 如果它没有被修改
 def rename_vars(pcs, global_states):
     ret_pcs = []
     vars_mapping = {}
@@ -166,6 +175,7 @@ def rename_vars(pcs, global_states):
 
 
 # split a file into smaller files
+# 将文件拆分成更小的文件
 def split_dicts(filename, nsub = 500):
     with open(filename) as json_file:
         c = json.load(json_file)

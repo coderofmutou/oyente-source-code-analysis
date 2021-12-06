@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+# 整个项目的函数入口，主要承担着接受参数，存储变量以及调用不同函数的作用
 
 import os
 import re
@@ -64,6 +65,7 @@ def has_dependencies_installed():
 
     return True
 
+# 分析合约字节码
 def analyze_bytecode():
     global args
 
@@ -82,6 +84,7 @@ def run_solidity_analysis(inputs):
     results = {}
     exit_code = 0
 
+    # 对 inputs 的内容进行遍历，并通过 symExec.run 来获取结果。
     for inp in inputs:
         logging.info("contract %s:", inp['contract'])
         result, return_code = symExec.run(disasm_file=inp['disasm_file'], source_map=inp['source_map'], source_file=inp['source'])
@@ -97,6 +100,11 @@ def run_solidity_analysis(inputs):
             exit_code = 1
     return results, exit_code
 
+# 分析 solidity 合约
+# analyze_solidity 函数的主要工作为:
+# 1. 主要做的就是根据输入的类型，来获得我们想要的 helper。
+# 2. 通过 helper 的 get_inputs() 函数，我们能够得到 inputs 变量。
+# 3. 将 input 变量传入 run_solidity_analysis() 函数，就能得到我们想要的结果。
 def analyze_solidity(input_type='solidity'):
     global args
 
@@ -106,22 +114,36 @@ def analyze_solidity(input_type='solidity'):
         helper = InputHelper(InputHelper.STANDARD_JSON, source=args.source, evm=args.evm, allow_paths=args.allow_paths)
     elif input_type == 'standard_json_output':
         helper = InputHelper(InputHelper.STANDARD_JSON_OUTPUT, source=args.source, evm=args.evm)
+    
+    # 获取合约相关信息，用于分析
     inputs = helper.get_inputs(global_params.TARGET_CONTRACTS)
     results, exit_code = run_solidity_analysis(inputs)
-    helper.rm_tmp_files()
 
+    helper.rm_tmp_files()
     if global_params.WEB:
         six.print_(json.dumps(results))
     return exit_code
 
+# main函数主要工作为:
+# 1. 实例化创建解析器，解析命令行传入的参数变量，参数变量部分存储于 global_params.py 中。
+# 2. add_argument 可以对应 args 内第二个参数，当使用 python3 oyente.py -s *.sol 指令时，args.source 的值对应的是合约文件的地址。
+# 3. 由于没有别的参数，将直接调用 exit_code = analyze_solidity()
 def main():
     # TODO: Implement -o switch.
 
     global args
 
+    # argparse 是一个 Python 模块：命令行选项、参数和子命令解析器。
+    # 主要有三个步骤：
+    # 创建 ArgumentParser() 对象
+    # 调用 add_argument() 方法添加参数
+    # 使用 parse_args() 解析添加的参数
     parser = argparse.ArgumentParser()
+    # ArgumentParser.add_mutually_exclusive_group(required=True):创建一个互斥的组, argparse 将会确保互斥组中只有一个参数在命令行中可用。
+    # 该方法也接受一个 required 参数，表示在互斥组中至少有一个参数是需要的。该对象和 ArgumentParser 对象类似
     group = parser.add_mutually_exclusive_group(required=True)
 
+    # 通过调用 add_argument() 方法给 ArgumentParser 对象添加程序所需的参数信息
     group.add_argument("-s",  "--source",    type=str, help="local source file name. Solidity by default. Use -b to process evm instead. Use stdin to read from stdin.")
     group.add_argument("-ru", "--remoteURL", type=str, help="Get contract from remote URL. Solidity by default. Use -b to process evm instead.", dest="remote_URL")
 
@@ -155,6 +177,8 @@ def main():
     parser.add_argument( "-gtc", "--generate-test-cases",    help="Generate test cases each branch of symbolic execution tree", action="store_true")
     parser.add_argument( "-sjo", "--standard-json-output",   help="Support Standard JSON output", action="store_true")
 
+    # 通过 parse_args() 方法解析参数
+    # 在脚本中，通常 parse_args() 会被不带参数调用，而 ArgumentParser 将自动从 sys.argv 中确定命令行参数。
     args = parser.parse_args()
 
     if args.root_path:

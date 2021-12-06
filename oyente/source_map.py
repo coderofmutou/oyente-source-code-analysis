@@ -12,6 +12,7 @@ class Source:
     def __init__(self, filename):
         self.filename = filename
         self.content = self._load_content()
+        # 换行位置
         self.line_break_positions = self._load_line_break_positions()
 
     def _load_content(self):
@@ -22,6 +23,8 @@ class Source:
     def _load_line_break_positions(self):
         return [i for i, letter in enumerate(self.content) if letter == '\n']
 
+# ast_helper: 存储着合约的各种索引和输出合约索引和状态的辅助类函数。
+# position_groups：包含着编译好的字节指令 asm 和辅助签名数据 auxdata，其中 begin 映射着合约函数某函数开始的字符串位置，end 映射着合约函数结束的字符串位置。
 class SourceMap:
     parent_filename = ""
     position_groups = {}
@@ -31,6 +34,7 @@ class SourceMap:
     remap = ""
     allow_paths = ""
 
+    # cname(对路径+文件名.sol:合约名) parent_filename(对路径+文件名.sol)
     def __init__(self, cname, parent_filename, input_type, root_path="", remap="", allow_paths=""):
         self.root_path = root_path
         self.cname = cname
@@ -40,6 +44,7 @@ class SourceMap:
             SourceMap.allow_paths = allow_paths
             SourceMap.parent_filename = parent_filename
             if input_type == "solidity":
+                 # 编译生成对应合约 asm 和 solidity 版本信息
                 SourceMap.position_groups = SourceMap._load_position_groups()
             elif input_type == "standard json":
                 SourceMap.position_groups = SourceMap._load_position_groups_standard_json()
@@ -47,13 +52,18 @@ class SourceMap:
                 raise Exception("There is no such type of input")
             SourceMap.ast_helper = AstHelper(SourceMap.parent_filename, input_type, SourceMap.remap, SourceMap.allow_paths)
             SourceMap.func_to_sig_by_contract = SourceMap._get_sig_to_func_by_contract()
+        # 源代码内容和文件名
         self.source = self._get_source()
+        # [{'begin': 25, 'end': 692, 'name': 'PUSH', 'value': '60'} ...]
         self.positions = self._get_positions()
         self.instr_positions = {}
+        # 变量名称集合
         self.var_names = self._get_var_names()
+        # 函数调用集合 ['bytes32(11111)', 'owner.send(reward)', 'sha256(msg.data)', 'msg.sender.send(reward)']
         self.func_call_names = self._get_func_call_names()
         self.callee_src_pairs = self._get_callee_src_pairs()
         self.func_name_to_params = self._get_func_name_to_params()
+        # 函数及对应 hash签名 变量？{'diff()': 'a0d7afb7', 'locked()': 'cf309012', 'owner()': '8da5cb5b', 'reward()': '228cb733', 'solution()': '4fb60251'}
         self.sig_to_func = self._get_sig_to_func()
 
     def get_source_code(self, pc):
@@ -172,6 +182,7 @@ class SourceMap:
         output = json.loads(output)
         return output["contracts"]
 
+    # 编译生成 asm 和版本信息
     @classmethod
     def _load_position_groups(cls):
         if cls.allow_paths:

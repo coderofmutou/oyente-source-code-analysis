@@ -1,3 +1,9 @@
+# 这个文件是这个框架最重要也是最难以理解的文件，它的基本步骤可以描述成：
+#   1. 初始化和收集各种变量。
+#   2. 生成 control flow graph(CFG)，这是一种在每个区块中只含有逻辑指令，不含有分支指令的图。
+#   3. 深度优先遍历 CFG，获取整一个逻辑框架所有的可能性。
+#   4. 对所有的可能性方案用 z3 求解器进行验算，对于位置的形参，使用 symbolic execution 的方式。
+
 import tokenize
 import zlib, base64
 from tokenize import NUMBER, NAME, NEWLINE
@@ -53,11 +59,12 @@ class Parameter:
         _kwargs = custom_deepcopy(self.__dict__)
         return Parameter(**_kwargs)
 
+# 初始化全局变量
 def initGlobalVars():
     global g_src_map
     global solver
     # Z3 solver
-
+    # Run Oyente in parallel
     if global_params.PARALLEL:
         t2 = Then('simplify', 'solve-eqs', 'smt')
         _t = Then('tseitin-cnf-core', 'split-clause')
@@ -121,14 +128,17 @@ def initGlobalVars():
     calls_affect_state = {}
 
     # capturing the last statement of each basic block
+    # 捕获每个基本块的最后一条语句
     global end_ins_dict
     end_ins_dict = {}
 
     # capturing all the instructions, keys are corresponding addresses
+    # 捕获所有指令，key 是对应的地址
     global instructions
     instructions = {}
 
     # capturing the "jump type" of each basic block
+    # 捕获每个基本块的“跳转类型”
     global jump_type
     jump_type = {}
 
@@ -148,6 +158,7 @@ def initGlobalVars():
     reentrancy_all_paths = []
 
     # store the path condition corresponding to each path in money_flow_all_paths
+    # 将每条路径对应的路径条件存储在 money_flow_all_paths 中
     global path_conditions
     path_conditions = []
 
@@ -155,6 +166,7 @@ def initGlobalVars():
     global_problematic_pcs = {"money_concurrency_bug": [], "reentrancy_bug": [], "time_dependency_bug": [], "assertion_failure": [], "integer_underflow": [], "integer_overflow": []}
 
     # store global variables, e.g. storage, balance of all paths
+    # 存储全局变量，例如 存储，所有路径的余额
     global all_gs
     all_gs = []
 
@@ -165,6 +177,7 @@ def initGlobalVars():
     no_of_test_cases = 0
 
     # to generate names for symbolic variables
+    # 为符号变量生成名称
     global gen
     gen = Generator()
 
@@ -188,6 +201,7 @@ def change_format():
     with open(g_disasm_file) as disasm_file:
         file_contents = disasm_file.readlines()
         i = 0
+        # 移除第一行字符串前后的换行符
         firstLine = file_contents[0].strip('\n')
         for line in file_contents:
             line = line.replace('SELFDESTRUCT', 'SUICIDE')
@@ -217,6 +231,16 @@ def change_format():
     with open(g_disasm_file, 'w') as disasm_file:
         disasm_file.write("\n".join(file_contents))
 
+# tokenize 是一个词汇扫描器，你可以看到每个词或者字符是什么类型的
+#   其中所有的运算符，分隔符和 ellipsis 都会被标记成 OP 类型。
+#   下面的 generate_tokens() 接受的参数必须是一个 readline，生成器会生成 5 个元素的具名元祖，内容分别是：
+#       type：令牌类型
+#       string：被令牌的字符串
+#       指定令牌在源中开始的行和列的 2 元组 (srow, scol) 
+#       指定令牌在源中结束的行和列的 2 元组 (erow, ecol) ；
+#       line：所传递的行（最后一个元组项）是 实际的 行
+#   其中还有一个属性 exact_type 标记了类型为 OP 词的确切操作类型。
+#   可以在 collect_vertices 函数中看到对这个对象的调用。
 def build_cfg_and_analyze():
     change_format()
     with open(g_disasm_file, 'r') as disasm_file:
@@ -225,6 +249,7 @@ def build_cfg_and_analyze():
         collect_vertices(tokens)
         construct_bb()
         construct_static_edges()
+        # 跳跃目标是动态构建的
         full_sym_exec()  # jump targets are constructed on the fly
 
 
@@ -234,6 +259,8 @@ def print_cfg():
     log.debug(str(edges))
 
 
+# positions 格式:{{'begin': 27, 'end': 141, 'name': 'DUP2'}, {'begin': 27, 'end': 141, 'name': 'SWAP1'}}
+# name 为 “PUSH”时 还有个 value {'begin': 27, 'end': 141, 'name': 'PUSH', 'value': '20'}
 def mapping_push_instruction(current_line_content, current_ins_address, idx, positions, length):
     global g_src_map
 
@@ -284,6 +311,16 @@ def mapping_non_push_instruction(current_line_content, current_ins_address, idx,
 # 1. Parse the disassembled file
 # 2. Then identify each basic block (i.e. one-in, one-out)
 # 3. Store them in vertices
+# 这个函数主要做的有：
+#   1. 解析汇编文件
+#   2. 判断区分不同的基础区块
+#   3. 把他们存在顶点中
+# 这个循环的主要作用就是将 block 添加到顶点中[重要]:
+#   1. 通过解析出来的 token 类型，这个循环进行不同的操作；例如 tok_type 为 NAME 时，就把对 tok_string 做判断。解析出来是 PUSH 之后，则会让 wait_for_push 设置为 True。
+#   2. 当读取该行结束之后，会调用一个 mapping_push_instruction，把 g_src_map.position 内的指令放入 g_src_map.instr_positions。
+#   3. 同时全局变量 end_ins_dict 记录的是每个基本块的最后一条语句
+#   4. 全局变量 instructions 负责记录指令。
+#   5. 全局变量 jump_type 负责记录分支的类型和位置。
 def collect_vertices(tokens):
     global g_src_map
     if g_src_map:
@@ -294,15 +331,21 @@ def collect_vertices(tokens):
     global instructions
     global jump_type
 
-    current_ins_address = 0
+    current_ins_address = 0 # pc
     last_ins_address = 0
-    is_new_line = True
+    is_new_line = True  # 新行标识
     current_block = 0
     current_line_content = ""
-    wait_for_push = False
+    wait_for_push = False   # PUSH 后为 True
     is_new_block = False
 
+    # tok_type:'number' tok_string:'0000' 不是'0000c'，需在 change_format() 中更改
+    # NUMBER==2,NAME==1,NEWLINE==4
+    # 0 PUSH1 => 0x60
+    # 2 0 (1, 0) 0 PUSH1 => 0x60
+    # tok_type, tok_string, (srow, scol), _, line_number
     for tok_type, tok_string, (srow, scol), _, line_number in tokens:
+        # 对 PUSH 后的值进行处理，向 instructions 中插入当前指令
         if wait_for_push is True:
             push_val = ""
             for ptok_type, ptok_string, _, _, _ in tokens:
@@ -322,6 +365,7 @@ def collect_vertices(tokens):
                     pass
 
             continue
+        # 寻找行号
         elif is_new_line is True and tok_type == NUMBER:  # looking for a line number
             last_ins_address = current_ins_address
             try:
@@ -331,13 +375,15 @@ def collect_vertices(tokens):
                 quit()
             is_new_line = False
             if is_new_block:
-                current_block = current_ins_address
+                current_block = current_ins_address # 新块的起始 pc
                 is_new_block = False
             continue
-        elif tok_type == NEWLINE:
+        elif tok_type == NEWLINE:   # /n
             is_new_line = True
             log.debug(current_line_content)
             instructions[current_ins_address] = current_line_content
+            # if len(current_line_content.split(' ')) == 2:
+            #     current_line_content = current_line_content.split(' ')[1]
             idx = mapping_non_push_instruction(current_line_content, current_ins_address, idx, positions, length) if g_src_map else None
             current_line_content = ""
             continue
@@ -362,21 +408,35 @@ def collect_vertices(tokens):
                 wait_for_push = True
             is_new_line = False
         if tok_string != "=" and tok_string != ">":
+        # if tok_string != "=" and tok_string != ">" and not(tok_string >= "a" and tok_string <= "f"):
             current_line_content += tok_string + " "
 
+    # 结束时给最后一个赋值
     if current_block not in end_ins_dict:
         log.debug("current block: %d", current_block)
         log.debug("last line: %d", current_ins_address)
         end_ins_dict[current_block] = current_ins_address
 
+    # 结束时给最后一个赋值
     if current_block not in jump_type:
         jump_type[current_block] = "terminal"
 
+    # 结束时给其他块的跳转类型赋值
     for key in end_ins_dict:
         if key not in jump_type:
-            jump_type[key] = "falls_to"
+            jump_type[key] = "falls_to" # ?
 
+# BasicBlock
+# 这个函数的主要作用是构建一个没有链接的 vertices 和 edges。
+# vertices 内存储着 BasicBlock，其内部存有该块的指令。
+# edge 则存有节点 key-value值，例如 {[0,[]],[13,[]],...}。
+# 节点内的值会在之后的 construct_static_edges() 补全。
 
+# 基本块是一个最大化的指令序列，程序执行只能从这个序列的第一条指令，从这个序列的最后一条指令退出。
+# 构建基本块的三个原则：
+#   1. 遇到程序、子程序的第一条指令或语句，结束当前基本块，并将该语句作为一个新块的第一条语句。
+#   2. 遇到跳转语句、分支语句、循环语句、将该语句作为当前块的最后一条语句，并结束当前块。
+#   3. 遇到其他语句直接将其加入当前基本块。
 def construct_bb():
     global vertices
     global edges
@@ -396,27 +456,29 @@ def construct_bb():
         vertices[key] = block
         edges[key] = []
 
-
 def construct_static_edges():
     add_falls_to()  # these edges are static
 
 
+# 这个函数的作用就是在 jump_type 不是 terminal 或者 unconditional 的时候，把节点的 target 赋给 edges 和 vertices。
 def add_falls_to():
     global vertices
     global edges
-    key_list = sorted(jump_type.keys())
+    key_list = sorted(jump_type.keys()) # falls_to 都在后面，会影响边的构建，需要进行 pc 排序
     length = len(key_list)
     for i, key in enumerate(key_list):
-        if jump_type[key] != "terminal" and jump_type[key] != "unconditional" and i+1 < length:
+        if jump_type[key] != "terminal" and jump_type[key] != "unconditional" and i+1 < length: # 即为"falls_to"/"conditional"
             target = key_list[i+1]
-            edges[key].append(target)
-            vertices[key].set_falls_to(target)
+            edges[key].append(target)   # 简单的设置为下一个块的起始 pc
+            vertices[key].set_falls_to(target)  # 简单的设置为下一个块的起始 pc
 
-
+# path_conditions_and_vars 指的是在 block 跳转的时候可能会调用的变量和需要处理的约束。
+# global_state 是在正常 block 执行的时候就有可能会调用的变量。
 def get_init_global_state(path_conditions_and_vars):
     global_state = {"balance" : {}, "pc": 0}
     init_is = init_ia = deposited_value = sender_address = receiver_address = gas_price = origin = currentCoinbase = currentNumber = currentDifficulty = currentGasLimit = callData = None
 
+    # INPUT_STATE 指的是假设链的状态，这里的默认值是 False
     if global_params.INPUT_STATE:
         with open('state.json') as f:
             state = json.loads(f.read())
@@ -444,36 +506,44 @@ def get_init_global_state(path_conditions_and_vars):
                 currentGasLimit = int(state["env"]["currentGasLimit"], 16)
 
     # for some weird reason these 3 vars are stored in path_conditions insteaad of global_state
+    # 出于某种奇怪的原因，这 3 个变量存储在 path_conditions 而不是 global_state 中
     else:
+        # 定义 BitVec 型的变量，作为 CALLDATASIZE 中可能传入的变量
         sender_address = BitVec("Is", 256)
         receiver_address = BitVec("Ia", 256)
         deposited_value = BitVec("Iv", 256)
         init_is = BitVec("init_Is", 256)
         init_ia = BitVec("init_Ia", 256)
 
+    # 对 path_conditions_and_vars 进行赋值
     path_conditions_and_vars["Is"] = sender_address
     path_conditions_and_vars["Ia"] = receiver_address
     path_conditions_and_vars["Iv"] = deposited_value
 
+    # 先设定约束，deposited_value 需要大于 0
     constraint = (deposited_value >= BitVecVal(0, 256))
     path_conditions_and_vars["path_condition"].append(constraint)
+    # 发送者的余额要大于 deposited_value 才能发
     constraint = (init_is >= deposited_value)
     path_conditions_and_vars["path_condition"].append(constraint)
+    # 接收者的值需要大于 0
     constraint = (init_ia >= BitVecVal(0, 256))
     path_conditions_and_vars["path_condition"].append(constraint)
 
     # update the balances of the "caller" and "callee"
-
+    # 更新发送者和接受者的余额
     global_state["balance"]["Is"] = (init_is - deposited_value)
     global_state["balance"]["Ia"] = (init_ia + deposited_value)
 
+    # 下面的值原先都为 None，由 gen_xxx 指定一个变量名
+    # 如 gas_price 就被制定了变量名 Ip
     if not gas_price:
-        new_var_name = gen.gen_gas_price_var()
+        new_var_name = gen.gen_gas_price_var()  # Ip
         gas_price = BitVec(new_var_name, 256)
         path_conditions_and_vars[new_var_name] = gas_price
 
     if not origin:
-        new_var_name = gen.gen_origin_var()
+        new_var_name = gen.gen_origin_var() # Io
         origin = BitVec(new_var_name, 256)
         path_conditions_and_vars[new_var_name] = origin
 
@@ -518,6 +588,10 @@ def get_init_global_state(path_conditions_and_vars):
 
     return global_state
 
+# 获取函数的 pc 和签名
+# 遍历整个指令集，找到起始为 PUSH4，且后一位是 EQ 且再后一位是 PUSH的，
+# 然后 start_block_to_func_sig 就记录下 func_sig。
+# 这个是在收集函数的 id，因为 PUSH4 后面的那个 x 其实就是函数的 id，收集函数其实就可以认为在收集 block 的逻辑。
 def get_start_block_to_func_sig():
     state = 0
     func_sig = None
@@ -536,18 +610,26 @@ def get_start_block_to_func_sig():
             state = 0
     return start_block_to_func_sig
 
+# 这一个函数涉及到的是 oyente 框架最关键的内容，就是对于合约安全的各种检测
+# 主要的步骤就是
+#   1. 获取全部参数，存入 param 变量。
+#   2. 使用 sym_exec_block 对所有的块进行深度优先遍历。
+#   3. 进行 symbolic execution，对 EVM 的栈的内容进行模仿，并且使用求解器约束参数的范围。
+#   4. 对不同的可能出现的问题进行逻辑判断，返回不同的异常信息——例如求解器的约束对没有限制的整数进行范围的判定等。
 def full_sym_exec():
-    # executing, starting from beginning
+    # executing, starting from beginning 执行，从头开始
     path_conditions_and_vars = {"path_condition" : []}
     global_state = get_init_global_state(path_conditions_and_vars)
     analysis = init_analysis()
     params = Parameter(path_conditions_and_vars=path_conditions_and_vars, global_state=global_state, analysis=analysis)
     if g_src_map:
-        start_block_to_func_sig = get_start_block_to_func_sig()
-    return sym_exec_block(params, 0, 0, 0, -1, 'fallback')
+        start_block_to_func_sig = get_start_block_to_func_sig() # 获取函数的 pc 和签名
+    return sym_exec_block(params, 0, 0, 0, -1, 'fallback')  # 从起始地址符号执行一个块，内含递归符号执行
 
 
 # Symbolically executing a block from the start address
+# 现在实际上已经获得了 block 和边了，但是对于 block 之间连续的逻辑，我们需要做一个深度优先遍历
+# 所以 sys_exec_block 会是一个递归函数
 def sym_exec_block(params, block, pre_block, depth, func_call, current_func_name):
     global solver
     global visited_edges
@@ -558,18 +640,26 @@ def sym_exec_block(params, block, pre_block, depth, func_call, current_func_name
     global results
     global g_src_map
 
+    # 对已经访问过的进行标记
     visited = params.visited
+    # 作为符号化执行的虚拟出来的栈
     stack = params.stack
+    # gas_memory
     mem = params.mem
+    # 符号化执行虚拟出来的内存
     memory = params.memory
+    # 这是在上面定义的一些链的常量(主要是 z3)
     global_state = params.global_state
+    # ？？？
     sha3_list = params.sha3_list
+    # 用于填充 block 与 block 之间的中间条件以及变量
     path_conditions_and_vars = params.path_conditions_and_vars
+    # 代表着分析结果
     analysis = params.analysis
     calls = params.calls
     overflow_pcs = params.overflow_pcs
 
-    Edge = namedtuple("Edge", ["v1", "v2"]) # Factory Function for tuples is used as dictionary key
+    Edge = namedtuple("Edge", ["v1", "v2"]) # 具名元组 Factory Function for tuples is used as dictionary key
     if block < 0:
         log.debug("UNKNOWN JUMP ADDRESS. TERMINATING THIS PATH")
         return ["ERROR"]
@@ -577,6 +667,8 @@ def sym_exec_block(params, block, pre_block, depth, func_call, current_func_name
     log.debug("Reach block address %d \n", block)
 
     if g_src_map:
+        # 如果 block 在起始 block，或者在函数清单内
+        # 如果是函数块，则得到 current_func_name
         if block in start_block_to_func_sig:
             func_sig = start_block_to_func_sig[block]
             current_func_name = g_src_map.sig_to_func[func_sig]
@@ -585,36 +677,47 @@ def sym_exec_block(params, block, pre_block, depth, func_call, current_func_name
             if match:
                 current_func_name =  list(match.groups())[0]
 
+    # 构建当前边(前 block 起始 pc, 当前 block 起始 pc)
     current_edge = Edge(pre_block, block)
-    if current_edge in visited_edges:
+    # 更新当前边的访问次数
+    if current_edge in visited_edges:   
         updated_count_number = visited_edges[current_edge] + 1
         visited_edges.update({current_edge: updated_count_number})
+    # 如果当前的 edges 没有被 visited 过，则更新为 1
     else:
         visited_edges.update({current_edge: 1})
 
+    # 如果这一个 edges 大于了循环的最高限制
     if visited_edges[current_edge] > global_params.LOOP_LIMIT:
         log.debug("Overcome a number of loop limit. Terminating this path ...")
         return stack
 
-    current_gas_used = analysis["gas"]
-    if current_gas_used > global_params.GAS_LIMIT:
+    # 计算当前的 gas，如果大于了限制，则返回 stack
+    current_gas_used = analysis["gas"]  # 获取当前已消耗的 gas
+    if current_gas_used > global_params.GAS_LIMIT:  # 处理 gas 超过上限的情况
         log.debug("Run out of gas. Terminating this path ... ")
         return stack
 
     # Execute every instruction, one at a time
+    # 执行每个指令，一次一个
     try:
+        # 获取当前 block 所有的指令
         block_ins = vertices[block].get_instructions()
     except KeyError:
         log.debug("This path results in an exception, possibly an invalid jump address")
         return ["ERROR"]
 
-    for instr in block_ins:
+    # 循环执行当前 block 的指令，所有的符号化执行的内容全部都在 sym_exec_ins 函数中
+    for instr in block_ins: # 符号执行块中的每一个指令
         sym_exec_ins(params, block, instr, func_call, current_func_name)
 
     # Mark that this basic block in the visited blocks
+    # 在已访问的块中标记此基本块
     visited.append(block)
     depth += 1
 
+    # 块指令执行完后(有块的指令分析结果)，添加 money 分析和时间戳依赖分析结果
+    # 把之前添加的一些 bug 结果进行汇总
     reentrancy_all_paths.append(analysis["reentrancy_bug"])
     if analysis["money_flow"] not in money_flow_all_paths:
         global_problematic_pcs["money_concurrency_bug"].append(analysis["money_concurrency_bug"])
@@ -624,12 +727,15 @@ def sym_exec_block(params, block, pre_block, depth, func_call, current_func_name
         all_gs.append(copy_global_values(global_state))
 
     # Go to next Basic Block(s)
+    # 然后前往下一个 block
+    # 如果这个 block 的类型是 terminal 或者 递归的深度大于最大深度限制了
     if jump_type[block] == "terminal" or depth > global_params.DEPTH_LIMIT:
         global total_no_of_paths
         global no_of_test_cases
 
         total_no_of_paths += 1
 
+        # 如果要求生成测试用例，则..
         if global_params.GENERATE_TEST_CASES:
             try:
                 model = solver.model()
@@ -645,45 +751,60 @@ def sym_exec_block(params, block, pre_block, depth, func_call, current_func_name
                 pass
 
         log.debug("TERMINATING A PATH ...")
+        # 显示结果
         display_analysis(analysis)
         if is_testing_evm():
             compare_storage_and_gas_unit_test(global_state, analysis)
 
+    # 如果是没有条件语句的跳转
     elif jump_type[block] == "unconditional":  # executing "JUMP"
+        # 继任者 = 当前 block 跳转的目标
         successor = vertices[block].get_jump_target()
+        # 新的参数
         new_params = params.copy()
+        # 获取新的 program counter
         new_params.global_state["pc"] = successor
         if g_src_map:
+            # 通过 program counter 和之前的 source map 获取源码
             source_code = g_src_map.get_source_code(global_state['pc'])
             if source_code in g_src_map.func_call_names:
                 func_call = global_state['pc']
         sym_exec_block(new_params, successor, block, depth, func_call, current_func_name)
+    # 如果跳转类型是 fall to，即什么都不做
     elif jump_type[block] == "falls_to":  # just follow to the next basic block
         successor = vertices[block].get_falls_to()
         new_params = params.copy()
         new_params.global_state["pc"] = successor
         sym_exec_block(new_params, successor, block, depth, func_call, current_func_name)
+    # 如果跳转类型是条件跳转
     elif jump_type[block] == "conditional":  # executing "JUMPI"
 
         # A choice point, we proceed with depth first search
-
+        # 则先获取分支的表达式
         branch_expression = vertices[block].get_branch_expression()
 
         log.debug("Branch expression: " + str(branch_expression))
-
+        # 设置 solver 的一个边界
         solver.push()  # SET A BOUNDARY FOR SOLVER
+        # 给 solver 增加一个边界表达式
         solver.add(branch_expression)
-
+        # 下面的这一部分是对 JUMPI 的条件为 true 检查
         try:
+            # 如果 solver 检测处有不满足的地方
             if solver.check() == unsat:
+                # 则返回有不可解的路径
                 log.debug("INFEASIBLE PATH DETECTED")
             else:
+                # 则跳转到下一个目标
                 left_branch = vertices[block].get_jump_target()
                 new_params = params.copy()
                 new_params.global_state["pc"] = left_branch
+                # 在 path_... 的变量中加入这一个分支的 expression
                 new_params.path_conditions_and_vars["path_condition"].append(branch_expression)
                 last_idx = len(new_params.path_conditions_and_vars["path_condition"]) - 1
+                # 定位上一个 inx 发生的 bug 并保存
                 new_params.analysis["time_dependency_bug"][last_idx] = global_state["pc"]
+                # 继续进入下一个 block
                 sym_exec_block(new_params, left_branch, block, depth, func_call, current_func_name)
         except TimeoutError:
             raise
@@ -691,13 +812,14 @@ def sym_exec_block(params, block, pre_block, depth, func_call, current_func_name
             if global_params.DEBUG_MODE:
                 traceback.print_exc()
 
+        # 下面的条件是对 JUMPI 为 false 条件的检查
         solver.pop()  # POP SOLVER CONTEXT
 
         solver.push()  # SET A BOUNDARY FOR SOLVER
         negated_branch_expression = Not(branch_expression)
         solver.add(negated_branch_expression)
 
-        log.debug("Negated branch expression: " + str(negated_branch_expression))
+        log.debug("Negated branch expression: " + str(negated_branch_expression))   # 否定
 
         try:
             if solver.check() == unsat:
@@ -728,6 +850,7 @@ def sym_exec_block(params, block, pre_block, depth, func_call, current_func_name
 
 
 # Symbolically executing an instruction
+# 象征性地执行一条指令
 def sym_exec_ins(params, block, instr, func_call, current_func_name):
     global MSIZE
     global visited_pcs
@@ -769,15 +892,22 @@ def sym_exec_ins(params, block, instr, func_call, current_func_name):
         return
 
     # collecting the analysis result by calling this skeletal function
+    # 通过调用这个骨架函数来收集分析结果
     # this should be done before symbolically executing the instruction,
+    # 这应该在符号执行指令之前完成
     # since SE will modify the stack and mem
+    # 因为符号执行将修改 stack 和 mem
     update_analysis(analysis, opcode, stack, mem, global_state, path_conditions_and_vars, solver)
+
+    # 如果确认存在重入则将 pc 添加到 global_problematic_pcs["reentrancy_bug"]
     if opcode == "CALL" and analysis["reentrancy_bug"] and analysis["reentrancy_bug"][-1]:
         global_problematic_pcs["reentrancy_bug"].append(global_state["pc"])
 
     log.debug("==============================")
     log.debug("EXECUTING: " + instr)
 
+    #
+    # 以下是指令执行
     #
     #  0s: Stop and Arithmetic Operations
     #
@@ -806,14 +936,17 @@ def sym_exec_ins(params, block, instr, func_call, current_func_name):
             if jump_type[block] == 'conditional':
                 jump_target = vertices[block].get_jump_target()
                 falls_to = vertices[block].get_falls_to()
+                # 检测 jump_target 块的指令和 falls_to 块的指令中是否有 REVERT 指令
                 check_revert = any([True for instruction in vertices[jump_target].get_instructions() if instruction.startswith('REVERT')])
                 if not check_revert:
                     check_revert = any([True for instruction in vertices[falls_to].get_instructions() if instruction.startswith('REVERT')])
 
+            # integer_overflow 检测，有 REVERT 指令则不需要检测，会撤销，不会导致 integer_overflow
             if jump_type[block] != 'conditional' or not check_revert:
                 if not isAllReal(computed, first):
                     solver.push()
                     solver.add(UGT(first, computed))
+                    # 如果 first > computed 可满足，即两数相加后反而小于第一个数，则出现了 integer_overflow
                     if check_sat(solver) == sat:
                         global_problematic_pcs['integer_overflow'].append(Overflow(global_state['pc'] - 1, solver.model()))
                         overflow_pcs.append(global_state['pc'] - 1)
@@ -822,6 +955,7 @@ def sym_exec_ins(params, block, instr, func_call, current_func_name):
             stack.insert(0, computed)
         else:
             raise ValueError('STACK underflow')
+    # 难道相乘就不会出现 integer_overflow 么？不严谨吧。。。
     elif opcode == "MUL":
         if len(stack) > 1:
             global_state["pc"] = global_state["pc"] + 1
@@ -836,6 +970,8 @@ def sym_exec_ins(params, block, instr, func_call, current_func_name):
             stack.insert(0, computed)
         else:
             raise ValueError('STACK underflow')
+
+    # integer_underflow 检测
     elif opcode == "SUB":
         if len(stack) > 1:
             global_state["pc"] = global_state["pc"] + 1
@@ -870,6 +1006,8 @@ def sym_exec_ins(params, block, instr, func_call, current_func_name):
             stack.insert(0, computed)
         else:
             raise ValueError('STACK underflow')
+    
+    # 除 0 处理
     elif opcode == "DIV":
         if len(stack) > 1:
             global_state["pc"] = global_state["pc"] + 1
@@ -1009,7 +1147,8 @@ def sym_exec_ins(params, block, instr, func_call, current_func_name):
             stack.insert(0, computed)
         else:
             raise ValueError('STACK underflow')
-    elif opcode == "ADDMOD":
+    # ADDMOD 也有可能出现 ADDMOD 吧？？？
+    elif opcode == "ADDMOD":    # (a + b) % c
         if len(stack) > 2:
             global_state["pc"] = global_state["pc"] + 1
             first = stack.pop(0)
@@ -1080,7 +1219,8 @@ def sym_exec_ins(params, block, instr, func_call, current_func_name):
             else:
                 # The computed value is unknown, this is because power is
                 # not supported in bit-vector theory
-                new_var_name = gen.gen_arbitrary_var()
+                # 不支持幂操作，设为未知数
+                new_var_name = gen.gen_arbitrary_var()  # some_var_*
                 computed = BitVec(new_var_name, 256)
             computed = simplify(computed) if is_expr(computed) else computed
             stack.insert(0, computed)
@@ -1216,6 +1356,7 @@ def sym_exec_ins(params, block, instr, func_call, current_func_name):
         # Tricky: this instruction works on both boolean and integer,
         # when we have a symbolic expression, type error might occur
         # Currently handled by try and catch
+        # 棘手：这条指令适用于布尔型和整数型，当我们有一个符号表达式时，可能会发生类型错误目前由 try 和 catch 处理
         if len(stack) > 0:
             global_state["pc"] = global_state["pc"] + 1
             first = stack.pop(0)
@@ -1320,13 +1461,13 @@ def sym_exec_ins(params, block, instr, func_call, current_func_name):
                 if position in sha3_list:
                     stack.insert(0, sha3_list[position])
                 else:
-                    new_var_name = gen.gen_arbitrary_var()
+                    new_var_name = gen.gen_arbitrary_var()  # some_var_*
                     new_var = BitVec(new_var_name, 256)
                     sha3_list[position] = new_var
                     stack.insert(0, new_var)
             else:
                 # push into the execution a fresh symbolic variable
-                new_var_name = gen.gen_arbitrary_var()
+                new_var_name = gen.gen_arbitrary_var()  # some_var_*
                 new_var = BitVec(new_var_name, 256)
                 path_conditions_and_vars[new_var_name] = new_var
                 stack.insert(0, new_var)
@@ -1345,7 +1486,7 @@ def sym_exec_ins(params, block, instr, func_call, current_func_name):
             if isReal(address) and global_params.USE_GLOBAL_BLOCKCHAIN:
                 new_var = data_source.getBalance(address)
             else:
-                new_var_name = gen.gen_balance_var()
+                new_var_name = gen.gen_balance_var()    # balance_*
                 if new_var_name in path_conditions_and_vars:
                     new_var = path_conditions_and_vars[new_var_name]
                 else:
@@ -1383,9 +1524,9 @@ def sym_exec_ins(params, block, instr, func_call, current_func_name):
                             new_var_name = param['name']
                             g_src_map.var_names.append(new_var_name)
                 else:
-                    new_var_name = gen.gen_data_var(position)
+                    new_var_name = gen.gen_data_var(position)   # Id_*
             else:
-                new_var_name = gen.gen_data_var(position)
+                new_var_name = gen.gen_data_var(position)   # Id_*
             if new_var_name in path_conditions_and_vars:
                 new_var = path_conditions_and_vars[new_var_name]
             else:
@@ -1396,7 +1537,7 @@ def sym_exec_ins(params, block, instr, func_call, current_func_name):
             raise ValueError('STACK underflow')
     elif opcode == "CALLDATASIZE":
         global_state["pc"] = global_state["pc"] + 1
-        new_var_name = gen.gen_data_size()
+        new_var_name = gen.gen_data_size()  # Id_size
         if new_var_name in path_conditions_and_vars:
             new_var = path_conditions_and_vars[new_var_name]
         else:
@@ -1449,8 +1590,8 @@ def sym_exec_ins(params, block, instr, func_call, current_func_name):
                     end = start + no_bytes * 2
                     code = evm[start: end]
                 mem[mem_location] = int(code, 16)
-            else:
-                new_var_name = gen.gen_code_var("Ia", code_from, no_bytes)
+            else:  
+                new_var_name = gen.gen_code_var("Ia", code_from, no_bytes)  # code_Ia_*_*
                 if new_var_name in path_conditions_and_vars:
                     new_var = path_conditions_and_vars[new_var_name]
                 else:
@@ -1481,7 +1622,7 @@ def sym_exec_ins(params, block, instr, func_call, current_func_name):
             raise ValueError('STACK underflow')
     elif opcode == "RETURNDATASIZE":
         global_state["pc"] += 1
-        new_var_name = gen.gen_arbitrary_var()
+        new_var_name = gen.gen_arbitrary_var()  # some_var_*
         new_var = BitVec(new_var_name, 256)
         stack.insert(0, new_var)
     elif opcode == "GASPRICE":
@@ -1496,7 +1637,7 @@ def sym_exec_ins(params, block, instr, func_call, current_func_name):
                 stack.insert(0, len(code)/2)
             else:
                 #not handled yet
-                new_var_name = gen.gen_code_size_var(address)
+                new_var_name = gen.gen_code_size_var(address)   # code_size_* address
                 if new_var_name in path_conditions_and_vars:
                     new_var = path_conditions_and_vars[new_var_name]
                 else:
@@ -1528,7 +1669,7 @@ def sym_exec_ins(params, block, instr, func_call, current_func_name):
                 code = evm[start: end]
                 mem[mem_location] = int(code, 16)
             else:
-                new_var_name = gen.gen_code_var(address, code_from, no_bytes)
+                new_var_name = gen.gen_code_var(address, code_from, no_bytes)   # code_*_*_*
                 if new_var_name in path_conditions_and_vars:
                     new_var = path_conditions_and_vars[new_var_name]
                 else:
@@ -1614,7 +1755,7 @@ def sym_exec_ins(params, block, instr, func_call, current_func_name):
                         # this means that it is possibly that current_miu_i < temp
                         current_miu_i = If(expression,temp,current_miu_i)
                 solver.pop()
-                new_var_name = gen.gen_mem_var(address)
+                new_var_name = gen.gen_mem_var(address) # mem_*
                 if new_var_name in path_conditions_and_vars:
                     new_var = path_conditions_and_vars[new_var_name]
                 else:
@@ -1723,11 +1864,11 @@ def sym_exec_ins(params, block, instr, func_call, current_func_name):
                         new_var_name = re.compile(operators).split(new_var_name)[0].strip()
                         new_var_name = g_src_map.get_parameter_or_state_var(new_var_name)
                         if new_var_name:
-                            new_var_name = gen.gen_owner_store_var(position, new_var_name)
+                            new_var_name = gen.gen_owner_store_var(position, new_var_name)  # Ia_store-*-*
                         else:
-                            new_var_name = gen.gen_owner_store_var(position)
+                            new_var_name = gen.gen_owner_store_var(position)    # Ia_store-*-
                     else:
-                        new_var_name = gen.gen_owner_store_var(position)
+                        new_var_name = gen.gen_owner_store_var(position)    # Ia_store-*-
 
                     if new_var_name in path_conditions_and_vars:
                         new_var = path_conditions_and_vars[new_var_name]
@@ -1802,10 +1943,11 @@ def sym_exec_ins(params, block, instr, func_call, current_func_name):
     elif opcode == "GAS":
         # In general, we do not have this precisely. It depends on both
         # the initial gas and the amount has been depleted
-        # we need o think about this in the future, in case precise gas
+        # we need to think about this in the future, in case precise gas
         # can be tracked
+        # 一般来说，我们并没有准确地做到这一点。 这取决于初始 gas 和消耗的数量，我们需要在未来考虑这一点，以防可以跟踪精确的 gas
         global_state["pc"] = global_state["pc"] + 1
-        new_var_name = gen.gen_gas_var()
+        new_var_name = gen.gen_gas_var()       # gas_*
         new_var = BitVec(new_var_name, 256)
         path_conditions_and_vars[new_var_name] = new_var
         stack.insert(0, new_var)
@@ -1817,7 +1959,7 @@ def sym_exec_ins(params, block, instr, func_call, current_func_name):
     #
     elif opcode.startswith('PUSH', 0):  # this is a push instruction
         position = int(opcode[4:], 10)
-        global_state["pc"] = global_state["pc"] + 1 + position
+        global_state["pc"] = global_state["pc"] + 1 + position  # pc处理
         pushed_value = int(instr_parts[1], 16)
         stack.insert(0, pushed_value)
         if global_params.UNIT_TEST == 3: # test evm symbolic
@@ -1867,7 +2009,7 @@ def sym_exec_ins(params, block, instr, func_call, current_func_name):
             stack.pop(0)
             stack.pop(0)
             stack.pop(0)
-            new_var_name = gen.gen_arbitrary_var()
+            new_var_name = gen.gen_arbitrary_var()  # some_var_*
             new_var = BitVec(new_var_name, 256)
             stack.insert(0, new_var)
         else:
@@ -1929,8 +2071,8 @@ def sym_exec_ins(params, block, instr, func_call, current_func_name):
                     if isReal(recipient):
                         new_address_name = "concrete_address_" + str(recipient)
                     else:
-                        new_address_name = gen.gen_arbitrary_address_var()
-                    old_balance_name = gen.gen_arbitrary_var()
+                        new_address_name = gen.gen_arbitrary_address_var()  # some_address_*
+                    old_balance_name = gen.gen_arbitrary_var()  # some_var_*
                     old_balance = BitVec(old_balance_name, 256)
                     path_conditions_and_vars[old_balance_name] = old_balance
                     constraint = (old_balance >= 0)
@@ -2010,7 +2152,7 @@ def sym_exec_ins(params, block, instr, func_call, current_func_name):
             stack.pop(0)
             stack.pop(0)
             stack.pop(0)
-            new_var_name = gen.gen_arbitrary_var()
+            new_var_name = gen.gen_arbitrary_var()  # some_var_*
             new_var = BitVec(new_var_name, 256)
             stack.insert(0, new_var)
         else:
@@ -2035,8 +2177,8 @@ def sym_exec_ins(params, block, instr, func_call, current_func_name):
         if isReal(recipient):
             new_address_name = "concrete_address_" + str(recipient)
         else:
-            new_address_name = gen.gen_arbitrary_address_var()
-        old_balance_name = gen.gen_arbitrary_var()
+            new_address_name = gen.gen_arbitrary_address_var()  # some_address_*
+        old_balance_name = gen.gen_arbitrary_var()  # some_var_*
         old_balance = BitVec(old_balance_name, 256)
         path_conditions_and_vars[old_balance_name] = old_balance
         constraint = (old_balance >= 0)
@@ -2055,6 +2197,7 @@ def sym_exec_ins(params, block, instr, func_call, current_func_name):
         raise Exception('UNKNOWN INSTRUCTION: ' + opcode)
 
 # Detect if a money flow depends on the timestamp
+# 检测资金流向是否取决于时间戳
 def detect_time_dependency():
     global results
     global g_src_map
@@ -2094,6 +2237,7 @@ def detect_time_dependency():
 
 
 # detect if two paths send money to different people
+# 检测两条路径是否向不同的人汇款
 def detect_money_concurrency():
     global results
     global g_src_map
@@ -2115,6 +2259,7 @@ def detect_money_concurrency():
             jflow = money_flow_all_paths[j]
             if len(jflow) == 1:
                 continue
+            # 检查两个不同的轨迹是否具有不同的以太流量
             if is_diff(flow, jflow):
                 flows.append(global_problematic_pcs["money_concurrency_bug"][i-1])
                 flows.append(global_problematic_pcs["money_concurrency_bug"][j])
@@ -2232,7 +2377,7 @@ def detect_integer_underflow():
         results['vulnerabilities']['integer_underflow'] = integer_underflow.get_warnings()
     else:
         results['vulnerabilities']['integer_underflow'] = integer_underflow.is_vulnerable()
-    log.info('\t  Integer Underflow: \t\t\t %s', integer_underflow.is_vulnerable())
+    log.info('\t  Integer Underflow: \t\t\t %s', integer_underflow.is_vulnerable()) # True/False 
 
 def detect_integer_overflow():
     global integer_overflow
@@ -2283,7 +2428,7 @@ def detect_vulnerabilities():
         if global_params.REPORT_MODE:
             rfile.write(str(total_no_of_paths) + "\n")
 
-        detect_money_concurrency()
+        detect_money_concurrency()  # Transaction-Ordering Dependence (TOD)
         detect_time_dependency()
 
         stop = time.time()
@@ -2389,7 +2534,9 @@ class Timeout:
 def do_nothing():
     pass
 
+# 构建 cfg 并分析
 def run_build_cfg_and_analyze(timeout_cb=do_nothing):
+    # 初始化全局变量
     initGlobalVars()
     global g_timeout
 
@@ -2438,8 +2585,12 @@ def analyze():
         if global_params.DEBUG_MODE:
             traceback.print_exc()
 
+    # 调用 run_build_cfg_and_analyze() 函数，构建 cfg 并分析
     run_build_cfg_and_analyze(timeout_cb=timeout_cb)
 
+# oyente.py 调用此函数来获取结果
+# 这个函数获取了生成的汇编文件的位置，源文件的位置和 SourceMap 的对象。
+# 然后 run 函数调用了 analyze()
 def run(disasm_file=None, source_file=None, source_map=None):
     global g_disasm_file
     global g_source_file
@@ -2453,9 +2604,12 @@ def run(disasm_file=None, source_file=None, source_map=None):
     if is_testing_evm():
         test()
     else:
+        # 改为全局变量
+        global begin
         begin = time.time()
         log.info("\t============ Results ===========")
         analyze()
         ret = detect_vulnerabilities()
         closing_message()
+        # print_cfg()
         return ret
