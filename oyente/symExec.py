@@ -622,6 +622,7 @@ def full_sym_exec():
     global_state = get_init_global_state(path_conditions_and_vars)
     analysis = init_analysis()
     params = Parameter(path_conditions_and_vars=path_conditions_and_vars, global_state=global_state, analysis=analysis)
+    # 如果输入的是字节码就没有这个步骤，因为没有 g_src_map
     if g_src_map:
         start_block_to_func_sig = get_start_block_to_func_sig() # 获取函数的 pc 和签名
     return sym_exec_block(params, 0, 0, 0, -1, 'fallback')  # 从起始地址符号执行一个块，内含递归符号执行
@@ -2604,8 +2605,6 @@ def run(disasm_file=None, source_file=None, source_map=None):
     if is_testing_evm():
         test()
     else:
-        # 改为全局变量
-        global begin
         begin = time.time()
         log.info("\t============ Results ===========")
         analyze()

@@ -51,14 +51,17 @@ def check_reentrancy_bug(path_conditions_and_vars, stack, global_state):
         list_vars = get_vars(expr)
         for var in list_vars:
             # check if a var is global
+            # 检查变量是否是全局变量
             if is_storage_var(var):
                 pos = get_storage_position(var)
                 if pos in global_state['Ia']:
+                    # 转出金额 等于 转入金额 
                     new_path_condition.append(var == global_state['Ia'][pos])
     transfer_amount = stack[2]
     if isSymbolic(transfer_amount) and is_storage_var(transfer_amount):
         pos = get_storage_position(transfer_amount)
         if pos in global_state['Ia']:
+            # 转账金额不能为 0
             new_path_condition.append(global_state['Ia'][pos] != 0)
     if global_params.DEBUG_MODE:
         log.info("=>>>>>> New PC: " + str(new_path_condition))
